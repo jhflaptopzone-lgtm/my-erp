@@ -1,0 +1,174 @@
+{
+  "entities": {
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Stock of laptop available or sold in store",
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "config": { "type": "string" },
+        "serial_number": { "type": "string" },
+        "buy_price": { "type": "number" },
+        "sell_price": { "type": "number" },
+        "supplier_name": { "type": "string" },
+        "purchase_date": { "type": "string" },
+        "status": { "type": "string", "enum": ["Available", "Sold"] },
+        "created_at": { "type": "string" },
+        "supplier_id": { "type": "string" }
+      },
+      "required": ["model", "config", "serial_number", "buy_price", "sell_price", "status"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Invoice sale record for laptops",
+      "type": "object",
+      "properties": {
+        "invoice_number": { "type": "string" },
+        "inventory_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "customer_address": { "type": "string" },
+        "sell_price": { "type": "number" },
+        "profit": { "type": "number" },
+        "payment_type": { "type": "string" },
+        "staff_id": { "type": "string" },
+        "sale_date": { "type": "string" },
+        "invoice_public_token": { "type": "string" }
+      },
+      "required": ["invoice_number", "customer_name", "customer_phone", "sell_price", "payment_type"]
+    },
+    "Installment": {
+      "title": "Installment",
+      "description": "Installment payments scheduled for EMI/Due sales",
+      "type": "object",
+      "properties": {
+        "sale_id": { "type": "string" },
+        "installment_number": { "type": "number" },
+        "due_date": { "type": "string" },
+        "amount": { "type": "number" },
+        "paid_amount": { "type": "number" },
+        "payment_date": { "type": "string" },
+        "status": { "type": "string", "enum": ["Pending", "Paid", "Overdue"] },
+        "remaining_balance": { "type": "number" }
+      },
+      "required": ["sale_id", "installment_number", "due_date", "amount", "status"]
+    },
+    "SalePayment": {
+      "title": "SalePayment",
+      "description": "Payment transactions for installments or sales",
+      "type": "object",
+      "properties": {
+        "sale_id": { "type": "string" },
+        "installment_id": { "type": "string" },
+        "amount": { "type": "number" },
+        "payment_date": { "type": "string" },
+        "payment_type": { "type": "string" },
+        "note": { "type": "string" }
+      },
+      "required": ["sale_id", "amount", "payment_date"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Suppliers delivering laptops and inventory",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "mobile": { "type": "string" },
+        "address": { "type": "string" },
+        "opening_balance": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "SupplierPurchase": {
+      "title": "SupplierPurchase",
+      "description": "Stock purchase from supplier",
+      "type": "object",
+      "properties": {
+        "supplier_id": { "type": "string" },
+        "inventory_id": { "type": "string" },
+        "purchase_amount": { "type": "number" },
+        "purchase_date": { "type": "string" }
+      },
+      "required": ["supplier_id", "purchase_amount", "purchase_date"]
+    },
+    "SupplierPayment": {
+      "title": "SupplierPayment",
+      "description": "Payment made to supplier",
+      "type": "object",
+      "properties": {
+        "supplier_id": { "type": "string" },
+        "payment_date": { "type": "string" },
+        "payment_amount": { "type": "number" },
+        "payment_type": { "type": "string" },
+        "note": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["supplier_id", "payment_date", "payment_amount"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Staff and admin accounts",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "access_id": { "type": "string" },
+        "role": { "type": "string", "enum": ["Admin", "Manager", "Staff"] },
+        "created_at": { "type": "string" }
+      },
+      "required": ["name", "access_id", "role"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit log for every data entry, modification, or deletion",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "action": { "type": "string" },
+        "entity_type": { "type": "string" },
+        "entity_id": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["action", "entity_type", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/inventory/{inventoryId}": {
+      "schema": "InventoryItem",
+      "description": "Collection of laptop stock"
+    },
+    "/sales/{saleId}": {
+      "schema": "Sale",
+      "description": "Collection of sale transactions"
+    },
+    "/installments/{installmentId}": {
+      "schema": "Installment",
+      "description": "Collection of installment records"
+    },
+    "/sale_payments/{paymentId}": {
+      "schema": "SalePayment",
+      "description": "Collection of sale payments"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "Supplier",
+      "description": "Collection of supplier profiles"
+    },
+    "/supplier_purchases/{purchaseId}": {
+      "schema": "SupplierPurchase",
+      "description": "Collection of supplier purchase transactions"
+    },
+    "/supplier_payments/{paymentId}": {
+      "schema": "SupplierPayment",
+      "description": "Collection of payments to suppliers"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Collection of user accounts"
+    },
+    "/activity_logs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Collection of automatic audit/backup activity logs"
+    }
+  }
+}
