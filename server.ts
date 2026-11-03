@@ -10,7 +10,7 @@ import jwt from "jsonwebtoken";
 import fs from "fs";
 import PDFDocument from "pdfkit";
 import { v4 as uuidv4 } from 'uuid';
-import { syncToCloud, deleteFromCloud, logCloudActivity, hydrateFromCloud, getCloudStats, syncAllToCloud, clearAllCloudData } from "./cloudStore.ts";
+import { syncToCloud, deleteFromCloud, logCloudActivity, hydrateFromCloud, getCloudStats, syncAllToCloud, clearAllCloudData, getInvoiceDirectFromCloud } from "./cloudStore.ts";
 import { searchLaptopModels, getLaptopConfig } from "./laptopCatalog.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -358,9 +358,6 @@ const initDb = async () => {
 
     await client.commit();
     console.log('Database initialization complete.');
-
-    // Hydrate persistent data from Firebase Firestore (avoids 24h container reset data loss)
-    await hydrateFromCloud(dbQuery);
   } catch (err: any) {
     await client.rollback();
     console.error('Error initializing database:', err);
@@ -369,6 +366,13 @@ const initDb = async () => {
     }
   } finally {
     client.release();
+  }
+
+  // Hydrate persistent data from Firebase Firestore (avoids container reset data loss)
+  try {
+    await hydrateFromCloud(dbQuery);
+  } catch (hydrateErr: any) {
+    console.error('Hydration error:', hydrateErr);
   }
 };
 
@@ -879,6 +883,73 @@ const generateInventoryReportPDF = (items: any[], summary: any, supplierDues: an
   doc.end();
   return fileName;
 };
+
+// Auto on-the-fly PDF Generator & Static Delivery
+app.get("/invoices/:fileName", async (req, res, next) => {
+  const uploadsDir = path.join(__dirname, "uploads", "invoices");
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  const filePath = path.join(uploadsDir, req.params.fileName);
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+
+  const match = req.params.fileName.match(/^Invoice_(JHF-[^.]+)\.pdf$/);
+  if (match) {
+    const invNum = match[1];
+    try {
+      let saleRes = await dbQuery(`
+        SELECT s.*, i.model, i.config, i.serial_number, u.name as staff_name 
+        FROM sales s 
+        JOIN inventory i ON s.inventory_id = i.id 
+        LEFT JOIN users u ON s.staff_id = u.id 
+        WHERE s.invoice_number = $1
+      `, [invNum]);
+      let sale = saleRes.rows[0];
+
+      if (!sale) {
+        const cloudData = await getInvoiceDirectFromCloud(invNum);
+        if (cloudData && cloudData.sale) {
+          sale = cloudData.sale;
+        }
+      }
+
+      if (sale) {
+        const installmentsRes = await dbQuery(
+          "SELECT * FROM installments WHERE sale_id = $1 ORDER BY installment_number ASC",
+          [sale.id]
+        );
+        generateInvoicePDF({
+          invoice_number: sale.invoice_number,
+          customer_name: sale.customer_name,
+          customer_phone: sale.customer_phone,
+          customer_address: sale.customer_address,
+          payment_type: sale.payment_type,
+          sell_price: sale.sell_price,
+          sale_date: sale.sale_date,
+          staff_name: sale.staff_name || 'System Admin'
+        }, {
+          model: sale.model,
+          config: sale.config,
+          serial_number: sale.serial_number,
+          sell_price: sale.sell_price
+        }, installmentsRes.rows);
+
+        setTimeout(() => {
+          if (fs.existsSync(filePath)) {
+            return res.sendFile(filePath);
+          }
+          next();
+        }, 300);
+        return;
+      }
+    } catch (e) {
+      console.error("Auto PDF generation error:", e);
+    }
+  }
+  next();
+});
 
 // API Routes
 app.get("/api/health", async (req, res) => {
@@ -2257,28 +2328,42 @@ app.post("/api/emi/payment/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Public Invoice Route
+// Public Invoice Route (Lifetime Access for Customers with Cloud Fallback)
 app.get("/api/public/invoice/:invoiceNumber", async (req, res) => {
   const { invoiceNumber } = req.params;
-  const { token } = req.query;
-
-  if (!token) return res.status(400).json({ message: "Token required" });
+  const token = (req.query.token as string | undefined)?.trim();
 
   try {
+    // 1. Try local database first
     const saleRes = await dbQuery(`
       SELECT s.*, i.model, i.config, i.serial_number 
       FROM sales s 
       JOIN inventory i ON s.inventory_id = i.id 
-      WHERE s.invoice_number = $1 AND s.invoice_public_token = $2
-    `, [invoiceNumber, token]);
+      WHERE s.invoice_number = $1
+    `, [invoiceNumber]);
     const sale = saleRes.rows[0];
 
-    if (!sale) return res.status(404).json({ message: "Invoice not found or invalid token" });
+    if (sale) {
+      if (token && sale.invoice_public_token && sale.invoice_public_token !== token) {
+        return res.status(403).json({ message: "Invalid invoice access token" });
+      }
 
-    const installmentsRes = await dbQuery("SELECT * FROM installments WHERE sale_id = $1 ORDER BY installment_number ASC", [sale.id]);
-    
-    res.json({ sale, installments: installmentsRes.rows });
+      const installmentsRes = await dbQuery("SELECT * FROM installments WHERE sale_id = $1 ORDER BY installment_number ASC", [sale.id]);
+      return res.json({ sale, installments: installmentsRes.rows });
+    }
+
+    // 2. Direct Cloud Firestore Lookup (Guarantees customer link works lifetime even during DB rebuild)
+    const cloudData = await getInvoiceDirectFromCloud(invoiceNumber);
+    if (cloudData && cloudData.sale) {
+      if (token && cloudData.sale.invoice_public_token && cloudData.sale.invoice_public_token !== token) {
+        return res.status(403).json({ message: "Invalid invoice access token" });
+      }
+      return res.json(cloudData);
+    }
+
+    res.status(404).json({ message: "Invoice not found" });
   } catch (err: any) {
+    console.error("Public invoice route error:", err);
     res.status(500).json({ message: err.message });
   }
 });

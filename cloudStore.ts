@@ -1,4 +1,5 @@
-import { firestore, collection, doc, setDoc, getDocs, deleteDoc } from './firebase.ts';
+import { firestore, collection, doc, setDoc, getDocs, deleteDoc, getDoc } from './firebase.ts';
+import { v4 as uuidv4 } from 'uuid';
 
 export const logCloudActivity = async (
   action: string,
@@ -162,6 +163,7 @@ export const syncAllToCloud = async (dbQuery: (sql: string, params?: any[]) => P
     // 3. Sales
     const sales = (await dbQuery("SELECT * FROM sales")).rows;
     for (const sale of sales) {
+      const token = sale.invoice_public_token || uuidv4();
       await syncToCloud('sales', sale.id, {
         invoice_number: sale.invoice_number,
         inventory_id: sale.inventory_id,
@@ -178,7 +180,7 @@ export const syncAllToCloud = async (dbQuery: (sql: string, params?: any[]) => P
         staff_id: sale.staff_id,
         sale_date: sale.sale_date,
         invoice_pdf_path: sale.invoice_pdf_path || null,
-        invoice_public_token: sale.invoice_public_token || null
+        invoice_public_token: token
       });
       report.sales++;
     }
@@ -261,22 +263,40 @@ export const syncAllToCloud = async (dbQuery: (sql: string, params?: any[]) => P
 
 export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) => Promise<any>) => {
   console.log('[CloudStore] Hydrating persistent data from Firebase Firestore...');
+
+  // 1. Hydrate Users
   try {
-    // 1. Hydrate Users
     const users = await loadAllFromCloud('users');
     for (const u of users) {
       if (u.access_id) {
         const exist = await dbQuery("SELECT id FROM users WHERE access_id = $1", [u.access_id]);
         if (exist.rowCount === 0) {
+          const idExist = u.id ? await dbQuery("SELECT id FROM users WHERE id = $1", [u.id]) : { rowCount: 0 };
+          if (idExist.rowCount === 0 && u.id) {
+            await dbQuery(
+              "INSERT INTO users (id, name, access_id, password, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+              [u.id, u.name, u.access_id, u.password, u.role, u.created_at || new Date().toISOString()]
+            );
+          } else {
+            await dbQuery(
+              "INSERT INTO users (name, access_id, password, role, created_at) VALUES ($1, $2, $3, $4, $5)",
+              [u.name, u.access_id, u.password, u.role, u.created_at || new Date().toISOString()]
+            );
+          }
+        } else {
           await dbQuery(
-            "INSERT INTO users (id, name, access_id, password, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-            [u.id, u.name, u.access_id, u.password, u.role, u.created_at || new Date().toISOString()]
+            "UPDATE users SET name = $1, password = $2, role = $3 WHERE access_id = $4",
+            [u.name, u.password, u.role, u.access_id]
           );
         }
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate users warning:', err.message);
+  }
 
-    // 2. Hydrate Suppliers
+  // 2. Hydrate Suppliers
+  try {
     const suppliers = await loadAllFromCloud('suppliers');
     for (const s of suppliers) {
       if (s.name) {
@@ -286,15 +306,24 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
             "INSERT INTO suppliers (id, name, mobile, address, opening_balance, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
             [s.id, s.name, s.mobile || null, s.address || null, parseFloat(s.opening_balance) || 0, s.created_at || new Date().toISOString()]
           );
+        } else {
+          await dbQuery(
+            "UPDATE suppliers SET name = $1, mobile = $2, address = $3, opening_balance = $4 WHERE id = $5",
+            [s.name, s.mobile || null, s.address || null, parseFloat(s.opening_balance) || 0, exist.rows[0].id]
+          );
         }
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate suppliers warning:', err.message);
+  }
 
-    // 3. Hydrate Inventory
+  // 3. Hydrate Inventory
+  try {
     const inventory = await loadAllFromCloud('inventory');
     for (const item of inventory) {
       if (item.serial_number) {
-        const exist = await dbQuery("SELECT id FROM inventory WHERE serial_number = $1", [item.serial_number]);
+        const exist = await dbQuery("SELECT id FROM inventory WHERE serial_number = $1 OR id = $2", [item.serial_number, item.id]);
         if (exist.rowCount === 0) {
           await dbQuery(
             "INSERT INTO inventory (id, model, config, serial_number, buy_price, sell_price, supplier_name, supplier_id, purchase_date, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
@@ -312,15 +341,28 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
               item.created_at || new Date().toISOString()
             ]
           );
+        } else {
+          await dbQuery(
+            "UPDATE inventory SET model = $1, config = $2, buy_price = $3, sell_price = $4, supplier_name = $5, status = $6 WHERE id = $7",
+            [item.model, item.config, parseFloat(item.buy_price) || 0, parseFloat(item.sell_price) || 0, item.supplier_name || null, item.status || 'Available', exist.rows[0].id]
+          );
         }
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate inventory warning:', err.message);
+  }
 
-    // 4. Hydrate Sales
+  // 4. Hydrate Sales
+  try {
     const sales = await loadAllFromCloud('sales');
     for (const sale of sales) {
       if (sale.invoice_number) {
-        const exist = await dbQuery("SELECT id FROM sales WHERE invoice_number = $1", [sale.invoice_number]);
+        const token = sale.invoice_public_token || uuidv4();
+        if (!sale.invoice_public_token) {
+          syncToCloud('sales', sale.id, { invoice_public_token: token }).catch(() => {});
+        }
+        const exist = await dbQuery("SELECT id FROM sales WHERE invoice_number = $1 OR id = $2", [sale.invoice_number, sale.id]);
         if (exist.rowCount === 0) {
           await dbQuery(
             "INSERT INTO sales (id, invoice_number, inventory_id, customer_name, customer_phone, customer_address, sell_price, profit, payment_type, due_estimate_date, due_reference_name, due_reference_phone, due_terms, staff_id, sale_date, invoice_pdf_path, invoice_public_token) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
@@ -341,17 +383,30 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
               sale.staff_id || 1,
               sale.sale_date || new Date().toISOString(),
               sale.invoice_pdf_path || null,
-              sale.invoice_public_token || null
+              token
             ]
+          );
+        } else {
+          await dbQuery(
+            "UPDATE sales SET invoice_public_token = COALESCE(invoice_public_token, $1) WHERE invoice_number = $2",
+            [token, sale.invoice_number]
           );
         }
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate sales warning:', err.message);
+  }
 
-    // 5. Hydrate Installments
+  // 5. Hydrate Installments
+  try {
     const installments = await loadAllFromCloud('installments');
     for (const inst of installments) {
-      if (inst.id && inst.sale_id) {
+      try {
+        if (!inst.id || !inst.sale_id) continue;
+        const saleExist = await dbQuery("SELECT id FROM sales WHERE id = $1", [inst.sale_id]);
+        if (saleExist.rowCount === 0) continue; // Skip orphaned installments from deleted sales!
+
         const exist = await dbQuery("SELECT id FROM installments WHERE id = $1", [inst.id]);
         if (exist.rowCount === 0) {
           await dbQuery(
@@ -368,14 +423,29 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
               parseFloat(inst.remaining_balance) || 0
             ]
           );
+        } else {
+          await dbQuery(
+            "UPDATE installments SET paid_amount = $1, status = $2, remaining_balance = $3 WHERE id = $4",
+            [parseFloat(inst.paid_amount) || 0, inst.status || 'Pending', parseFloat(inst.remaining_balance) || 0, inst.id]
+          );
         }
+      } catch (e: any) {
+        console.warn(`[CloudStore] Installment ${inst.id} skip:`, e.message);
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate installments warning:', err.message);
+  }
 
-    // 6. Hydrate Sale Payments
+  // 6. Hydrate Sale Payments
+  try {
     const payments = await loadAllFromCloud('sale_payments');
     for (const p of payments) {
-      if (p.id) {
+      try {
+        if (!p.id || !p.sale_id) continue;
+        const saleExist = await dbQuery("SELECT id FROM sales WHERE id = $1", [p.sale_id]);
+        if (saleExist.rowCount === 0) continue; // Skip orphaned payments from deleted sales!
+
         const exist = await dbQuery("SELECT id FROM sale_payments WHERE id = $1", [p.id]);
         if (exist.rowCount === 0) {
           await dbQuery(
@@ -391,24 +461,52 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
             ]
           );
         }
+      } catch (e: any) {
+        console.warn(`[CloudStore] Payment ${p.id} skip:`, e.message);
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate payments warning:', err.message);
+  }
 
-    // 7. Hydrate Supplier Purchases
+  // 7. Hydrate Supplier Purchases
+  try {
     const purchases = await loadAllFromCloud('supplier_purchases');
     for (const sp of purchases) {
-      if (sp.id && sp.supplier_id && sp.inventory_id) {
-        const exist = await dbQuery("SELECT id FROM supplier_purchases WHERE id = $1", [sp.id]);
+      try {
+        if (!sp.supplier_id || !sp.inventory_id) continue;
+        const supExist = await dbQuery("SELECT id FROM suppliers WHERE id = $1", [sp.supplier_id]);
+        const invExist = await dbQuery("SELECT id FROM inventory WHERE id = $1", [sp.inventory_id]);
+        if (supExist.rowCount === 0 || invExist.rowCount === 0) continue;
+
+        const isNumericId = !isNaN(Number(sp.id)) && String(sp.id).indexOf('_') === -1;
+        const exist = isNumericId
+          ? await dbQuery("SELECT id FROM supplier_purchases WHERE id = $1", [sp.id])
+          : await dbQuery("SELECT id FROM supplier_purchases WHERE supplier_id = $1 AND inventory_id = $2", [sp.supplier_id, sp.inventory_id]);
+
         if (exist.rowCount === 0) {
-          await dbQuery(
-            "INSERT INTO supplier_purchases (id, supplier_id, inventory_id, purchase_amount, purchase_date) VALUES ($1, $2, $3, $4, $5)",
-            [sp.id, sp.supplier_id, sp.inventory_id, parseFloat(sp.purchase_amount) || 0, sp.purchase_date]
-          );
+          if (isNumericId) {
+            await dbQuery(
+              "INSERT INTO supplier_purchases (id, supplier_id, inventory_id, purchase_amount, purchase_date) VALUES ($1, $2, $3, $4, $5)",
+              [sp.id, sp.supplier_id, sp.inventory_id, parseFloat(sp.purchase_amount) || 0, sp.purchase_date]
+            );
+          } else {
+            await dbQuery(
+              "INSERT INTO supplier_purchases (supplier_id, inventory_id, purchase_amount, purchase_date) VALUES ($1, $2, $3, $4)",
+              [sp.supplier_id, sp.inventory_id, parseFloat(sp.purchase_amount) || 0, sp.purchase_date]
+            );
+          }
         }
+      } catch (e: any) {
+        console.warn(`[CloudStore] Supplier purchase ${sp.id} skip:`, e.message);
       }
     }
+  } catch (err: any) {
+    console.warn('[CloudStore] Hydrate supplier purchases warning:', err.message);
+  }
 
-    // 8. Hydrate Supplier Payments
+  // 8. Hydrate Supplier Payments
+  try {
     const supplierPayments = await loadAllFromCloud('supplier_payments');
     for (const sp of supplierPayments) {
       if (sp.id && sp.supplier_id) {
@@ -429,9 +527,47 @@ export const hydrateFromCloud = async (dbQuery: (sql: string, params?: any[]) =>
         }
       }
     }
-
-    console.log('[CloudStore] Firestore data hydration completed successfully. Persistent storage verified.');
   } catch (err: any) {
-    console.warn('[CloudStore] Hydration notice:', err.message);
+    console.warn('[CloudStore] Hydrate supplier payments warning:', err.message);
+  }
+
+  console.log('[CloudStore] Firestore data hydration completed successfully. Persistent storage verified.');
+};
+
+// Fallback direct cloud invoice lookup for lifetime customer invoice links
+export const getInvoiceDirectFromCloud = async (invoiceNumber: string) => {
+  try {
+    const allSales = await loadAllFromCloud('sales');
+    const sale = allSales.find((s: any) => s.invoice_number === invoiceNumber);
+    if (!sale) return null;
+
+    // Load related item
+    let itemData: any = {};
+    if (sale.inventory_id) {
+      const invRef = doc(firestore, 'inventory', String(sale.inventory_id));
+      const invSnap = await getDoc(invRef);
+      if (invSnap.exists()) {
+        itemData = invSnap.data();
+      }
+    }
+
+    // Load related installments
+    const allInstallments = await loadAllFromCloud('installments');
+    const installments = allInstallments
+      .filter((inst: any) => String(inst.sale_id) === String(sale.id))
+      .sort((a: any, b: any) => (a.installment_number || 0) - (b.installment_number || 0));
+
+    return {
+      sale: {
+        ...sale,
+        model: itemData.model || 'Laptop',
+        config: itemData.config || '',
+        serial_number: itemData.serial_number || ''
+      },
+      installments
+    };
+  } catch (err: any) {
+    console.error('[CloudStore] Direct cloud invoice lookup failed:', err);
+    return null;
   }
 };

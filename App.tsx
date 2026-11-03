@@ -1555,17 +1555,16 @@ const SalesHistory = () => {
                 </td>
                 <td className="p-4 text-xs text-gray-400">{formatOnlyDateBD(sale.sale_date)}</td>
                 <td className="p-4">
-                  <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
-                    sale.invoice_pdf_path ? 'bg-neon-green/20 text-neon-green' : 'bg-red-500/20 text-red-500'
-                  }`}>
-                    {sale.invoice_pdf_path ? 'Generated' : 'Missing'}
+                  <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-neon-green/20 text-neon-green border border-neon-green/30">
+                    Generated
                   </span>
                 </td>
                 <td className="p-4 text-right">
                   <div className="flex items-center justify-end space-x-2">
                     <button 
                       onClick={() => {
-                        const url = `${window.location.origin}/invoices/${sale.invoice_pdf_path}`;
+                        const pdfName = sale.invoice_pdf_path || `Invoice_${sale.invoice_number}.pdf`;
+                        const url = `${window.location.origin}/invoices/${pdfName}`;
                         window.open(url, '_blank');
                       }}
                       className="p-2 hover:bg-neon-green/10 text-gray-400 hover:text-neon-green rounded-lg transition-colors flex items-center"
@@ -3407,7 +3406,10 @@ const PublicInvoiceView = () => {
   useEffect(() => {
     const fetchInvoice = async () => {
       try {
-        const res = await axios.get(`/api/public/invoice/${invoiceNumber}?token=${token}`);
+        const url = token 
+          ? `/api/public/invoice/${invoiceNumber}?token=${encodeURIComponent(token)}`
+          : `/api/public/invoice/${invoiceNumber}`;
+        const res = await axios.get(url);
         setData(res.data);
       } catch (err: any) {
         setError(err.response?.data?.message || 'Failed to load invoice');
@@ -3415,7 +3417,7 @@ const PublicInvoiceView = () => {
         setLoading(false);
       }
     };
-    if (invoiceNumber && token) fetchInvoice();
+    if (invoiceNumber) fetchInvoice();
     else {
       setLoading(false);
       setError('Invalid invoice link');
